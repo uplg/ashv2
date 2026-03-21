@@ -123,7 +123,10 @@ where
             debug!("Received retransmission of data frame: {data}");
             self.send_ack().await?;
             self.ack_sent_frames(data.ack_num()).await?;
-            self.handle_payload(data.into_payload()).await;
+            // Do NOT forward the payload again -- retransmissions are duplicates
+            // of already-delivered frames. Forwarding them would cause the EZSP
+            // decoder to receive the same payload twice, leading to desynchronization
+            // and "Too many bytes to decode" errors.
             return Ok(());
         }
 
