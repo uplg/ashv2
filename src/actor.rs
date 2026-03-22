@@ -1,5 +1,5 @@
 use serialport::SerialPort;
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::mpsc::{Sender, UnboundedSender, channel};
 
 pub use self::proxy::Proxy;
 pub use self::receiver::Receiver;
@@ -34,7 +34,7 @@ where
     /// Returns a [`serialport::Error`] if the serial port cannot be cloned.
     pub fn new(
         serial_port: T,
-        response: Sender<Payload>,
+        response: UnboundedSender<Payload>,
         message_queue_len: usize,
     ) -> Result<Self, serialport::Error>
     where

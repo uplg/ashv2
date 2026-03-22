@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use log::{debug, error, info, trace, warn};
 use serialport::SerialPort;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::SendError;
 
 use self::buffer::Buffer;
@@ -21,7 +22,7 @@ mod buffer;
 #[derive(Debug)]
 pub struct Receiver<T> {
     buffer: Buffer<T>,
-    response: Sender<Payload>,
+    response: UnboundedSender<Payload>,
     transmitter: Sender<Message>,
     last_received_frame_num: Option<WrappingU3>,
 }
@@ -31,7 +32,7 @@ where
     T: SerialPort,
 {
     /// Creates a new `ASHv2` receiver.
-    pub fn new(serial_port: T, response: Sender<Payload>, transmitter: Sender<Message>) -> Self {
+    pub fn new(serial_port: T, response: UnboundedSender<Payload>, transmitter: Sender<Message>) -> Self {
         Self {
             buffer: serial_port.into(),
             response,
@@ -175,7 +176,7 @@ where
     /// Send the response frame's payload through the response channel.
     async fn handle_payload(&self, mut payload: Payload) {
         payload.mask();
-        self.response.send(payload).await.unwrap_or_else(|error| {
+        self.response.send(payload).unwrap_or_else(|error| {
             error!("Failed to send payload through response channel: {error}");
         });
     }
