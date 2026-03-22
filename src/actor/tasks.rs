@@ -42,6 +42,16 @@ where
 }
 
 impl<T> Tasks<T> {
+    /// Returns `true` if both the transmitter and receiver tasks are still running.
+    ///
+    /// When either task has finished (due to a panic, error, or normal exit),
+    /// this returns `false`, indicating that the ASH transport is no longer healthy
+    /// and the pipeline should be rebuilt.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        !self.transmitter.is_finished() && !self.receiver.is_finished()
+    }
+
     /// Terminate the tasks.
     ///
     /// # Errors
