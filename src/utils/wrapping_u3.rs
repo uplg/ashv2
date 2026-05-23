@@ -5,10 +5,11 @@ use core::num::NonZero;
 use core::ops::{Add, AddAssign};
 
 const MASK: u8 = 0b0000_0111;
-const NON_ZERO_BIT: u8 = 0b0000_1000;
-const MODULO: usize = 7;
+const UNUSED_BITS: u8 = !MASK;
 
-/// A three bit number.
+/// A three bit unsigned integer which wraps on adding.
+// The inner `NonZero<u8>` type is used in conjunction with `#[repr(transparent)]`
+// to allow niche optimizations of this type when used in e.g. an `Option.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct WrappingU3(NonZero<u8>);
@@ -22,8 +23,8 @@ impl WrappingU3 {
     pub const fn from_u8_lossy(n: u8) -> Self {
         #[expect(unsafe_code)]
         // SAFETY: We create a three bit number by applying `MASK` to `n`.
-        // Finally, we OR the result with `NON_ZERO_BIT`, which makes the number non-zero.
-        Self(unsafe { NonZero::new_unchecked(n & MASK | NON_ZERO_BIT) })
+        // Finally, we OR the result with `UNUSED_BITS`, which makes the number non-zero.
+        Self(unsafe { NonZero::new_unchecked(n & MASK | UNUSED_BITS) })
     }
 
     /// Returns the number as an u8.
@@ -37,7 +38,7 @@ impl Add for WrappingU3 {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Self::from_u8_lossy(self.as_u8().wrapping_add(rhs.as_u8()))
+        self.add(rhs.as_u8())
     }
 }
 
@@ -49,18 +50,9 @@ impl Add<u8> for WrappingU3 {
     }
 }
 
-impl Add<usize> for WrappingU3 {
-    type Output = Self;
-
-    fn add(self, rhs: usize) -> Self::Output {
-        #[expect(clippy::cast_possible_truncation, clippy::suspicious_arithmetic_impl)]
-        Self::from_u8_lossy((usize::from(self.as_u8()).wrapping_add(rhs) % MODULO) as u8)
-    }
-}
-
 impl AddAssign for WrappingU3 {
     fn add_assign(&mut self, rhs: Self) {
-        *self = Self::from_u8_lossy(self.as_u8().wrapping_add(rhs.as_u8()));
+        self.add_assign(rhs.as_u8());
     }
 }
 
@@ -85,26 +77,6 @@ impl Display for WrappingU3 {
 impl PartialEq<u8> for WrappingU3 {
     fn eq(&self, other: &u8) -> bool {
         self.as_u8() == *other
-    }
-}
-
-impl From<WrappingU3> for u8 {
-    fn from(value: WrappingU3) -> Self {
-        value.as_u8()
-    }
-}
-
-impl TryFrom<u8> for WrappingU3 {
-    type Error = u8;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        let u3 = Self::from_u8_lossy(value);
-
-        if u3.as_u8() == value {
-            Ok(u3)
-        } else {
-            Err(value)
-        }
     }
 }
 

@@ -12,7 +12,7 @@ at [silabs.com](https://docs.silabs.com/zigbee/latest/uart-gateway-protocol-refe
 This library provides the `Actor` struct which implements the [actor model](https://en.wikipedia.org/wiki/Actor_model)
 for the ASHv2 protocol.
 
-It is to be initialized with the underlying serial port ASH transmitter and response channel size.
+It is to be initialized with the underlying serial port, response channel sender and messaging channel size.
 
 ```rust
 use ashv2::{Actor, BaudRate, FlowControl, open};
@@ -24,29 +24,30 @@ async fn main() {
     let serial_port = open("/dev/ttymxc3", BaudRate::RstCts, FlowControl::Hardware)
         .expect("Failed to open serial port");
 
-    // Crate a communication channel with a specified size.
-    let (ash_tx, ash_rx) = channel(64);
-    // Create the ASHv2 actor, which returns the actor,
-    // a proxy to communicate with it, and a receiver for responses.
-    let (actor, proxy) = Actor::new(serial_port, ash_tx, 64).expect("Failed to create actor.");
+    // Crate a response channel with a specified size.
+    let (response_tx, response_rx) = channel(64);
+    // Create the ASHv2 actor, passing in the response transmitter
+    // and a messaging channel size.
+    let actor = Actor::new(serial_port, response_tx, 64).expect("Failed to create actor");
     // Spawn the actor's tasks to handle communication.
-    let (_transmitter_task, _receiver_task) = actor.spawn();
+    // This also returns a proxy to communicate with the actor.
+    let (tasks, proxy) = actor.spawn();
 
     // Send a data frame to the NCP using the proxy.
     // Example: EZSP version command
     let request_data = vec![0x00, 0x00, 0x00, 0x02];
     proxy
         .send(request_data.into_iter().collect())
-        .await
-        .expect("Failed to send request")
-        .await
-        .expect("Failed to receive response")
-        .expect("Actor reported an error");
+        .expect("Request failed");
 
     // Receive a response from the NCP.
-    if let Some(response) = receiver.recv().await {
+    if let Some(response) = response_rx.recv().await {
         println!("Received response: {response:?}");
     }
+
+    // Optionally terminate the actor tasks when done.
+    // This will return the original serial port on successful termination.
+    let _serial_port = tasks.terminate().await.expect("Actor tasks failed to join");
 }
 ```
 
