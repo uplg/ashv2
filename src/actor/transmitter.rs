@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::io::ErrorKind;
 use std::ops::BitAnd;
@@ -8,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, trace, warn};
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc::{Receiver, WeakSender};
+use tokio::sync::mpsc::Receiver;
+use tokio::time::sleep;
 
 use self::buffer::Buffer;
 use self::transmission::Transmission;
@@ -26,14 +28,26 @@ const T_RSTACK_MAX: Duration = Duration::from_millis(T_RSTACK_MAX_MILLIS);
 
 const T_RX_ACK_MAX: Duration = Duration::from_millis(T_RX_ACK_MAX_MILLIS);
 
-const TRANSMITTER_CHANNEL_CLOSED: &str = "ASHv2 transmitter channel is closed";
+/// Delay between housekeeping ticks while there is backlog (pending messages
+/// to retry or in-flight transmissions to watch for retransmission).
+const TICK_DELAY: Duration = Duration::from_millis(100);
+
+/// Maximum number of messages kept in the local pending queue.
+///
+/// The pending queue holds payloads that could not be transmitted yet (link
+/// down or transmission window full). It is local to the transmitter: the
+/// transmitter must NEVER send into its own bounded input channel, as that
+/// deadlocks the whole actor once the channel fills up (the receiver also
+/// produces into that channel and would block right behind it).
+const PENDING_CAPACITY: usize = 64;
 
 /// `ASHv2` transmitter.
 #[derive(Debug)]
 pub struct Transmitter<T> {
     buffer: Buffer<T>,
     messages: Receiver<Message>,
-    requeue: WeakSender<Message>,
+    /// Local queue of messages to retry (link down or window full).
+    pending: VecDeque<Message>,
     status: Status,
     last_rst_sent: Option<Instant>,
     transmissions: heapless::Vec<Transmission, TX_K>,
@@ -44,11 +58,11 @@ pub struct Transmitter<T> {
 impl<T> Transmitter<T> {
     /// Creates a new `ASHv2` transmitter.
     #[must_use]
-    pub const fn new(writer: T, messages: Receiver<Message>, requeue: WeakSender<Message>) -> Self {
+    pub const fn new(writer: T, messages: Receiver<Message>) -> Self {
         Self {
             buffer: Buffer::new(writer),
             messages,
-            requeue,
+            pending: VecDeque::new(),
             status: Status::Uninitialized,
             last_rst_sent: None,
             transmissions: heapless::Vec::new(),
@@ -69,10 +83,28 @@ where
             error!("Failed to send initial RST frame: {error}");
         });
 
-        while let Some(message) = self.messages.recv().await {
-            trace!("Received message: {message}");
+        loop {
+            let has_backlog = !self.pending.is_empty() || !self.transmissions.is_empty();
 
-            if let Err(error) = self.handle_message(message).await {
+            let message = tokio::select! {
+                maybe_message = self.messages.recv() => {
+                    let Some(message) = maybe_message else {
+                        break;
+                    };
+                    Some(message)
+                }
+                () = sleep(TICK_DELAY), if has_backlog => None,
+            };
+
+            let result = match message {
+                Some(message) => {
+                    trace!("Received message: {message}");
+                    self.handle_message(message).await
+                }
+                None => self.tick().await,
+            };
+
+            if let Err(error) = result {
                 error!("Resetting connection due to I/O error: {error}");
                 self.status = Status::Failed;
             }
@@ -82,21 +114,41 @@ where
         info!("Transmitter loop terminated.");
     }
 
+    /// Periodic housekeeping: retransmit timed-out `DATA` frames and retry
+    /// one pending message.
+    async fn tick(&mut self) -> io::Result<()> {
+        self.retransmit_timed_out().await?;
+
+        if let Some(message) = self.pending.pop_front() {
+            trace!("Retrying pending message: {message}");
+            self.handle_message(message).await?;
+        }
+
+        Ok(())
+    }
+
     async fn handle_message(&mut self, message: Message) -> io::Result<()> {
         if self.status != Status::Connected {
             if let Message::RstAck(ack) = message {
                 return self.handle_rst_ack(ack).await;
             }
 
-            trace!("Received message before connection was established. Re-queueing.");
-            self.requeue(message).await?;
-
             // Only log if the connection has failed, not if it hasn't been established yet.
             if self.status == Status::Failed {
                 warn!("ASHv2 Connection failed. Resetting...");
             }
 
-            return self.reset().await;
+            self.reset().await?;
+
+            // Keep payloads for delivery after reconnection, but drop
+            // link-control messages: they refer to the pre-reset frame space
+            // and replaying them after a reconnect only corrupts the link.
+            match message {
+                payload @ Message::Payload { .. } => self.enqueue_pending(payload),
+                other => trace!("Dropping link-control message while disconnected: {other}"),
+            }
+
+            return Ok(());
         }
 
         match message {
@@ -124,12 +176,11 @@ where
     ) -> io::Result<()> {
         if self.transmissions.is_full() {
             warn!("Insufficient space in transmission queue for payload, requeueing.");
-            return self
-                .requeue(Message::Payload {
-                    payload,
-                    response_tx: response,
-                })
-                .await;
+            self.enqueue_pending(Message::Payload {
+                payload,
+                response_tx: response,
+            });
+            return Ok(());
         }
 
         let data = Data::new(self.next_frame_number(), self.ack_number, *payload);
@@ -173,6 +224,14 @@ where
             if timestamp.elapsed() < T_RSTACK_MAX {
                 debug!("Connection established successfully.");
                 self.status = Status::Connected;
+                // Per the ASH specification, both sides restart frame numbering
+                // from zero after a reset. In-flight transmissions are lost;
+                // their EZSP commands will time out and be retried upstream.
+                // Without this, the post-reset session starts with stale frame
+                // numbers and wedges in an out-of-sequence NAK storm.
+                self.frame_number = 0;
+                self.ack_number = 0;
+                self.transmissions.clear();
                 Ok(())
             } else {
                 warn!("RST ACK received after timeout. Resetting connection again.");
@@ -193,11 +252,6 @@ where
 
     /// Remove `DATA` frames from the queue that have been acknowledged by the NCP.
     fn ack_sent_frames(&mut self, ack_num: u8) {
-        // Remove timed-out transmissions.
-        self.transmissions
-            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
-
-        // Remove acknowledged transmissions.
         while let Some(transmission) = self
             .transmissions
             .iter()
@@ -216,18 +270,37 @@ where
 
     /// Retransmit `DATA` frames that have been `NAK`ed by the NCP.
     async fn nak_sent_frames(&mut self, nak_num: u8) -> io::Result<()> {
-        // Remove timed-out transmissions.
-        self.transmissions
-            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
-
-        // Retransmit NAK'ed transmission.
         if let Some(transmission) = self
             .transmissions
             .iter()
-            .position(|transmission| transmission.frame_num() == nak_num)
+            .position(|transmission| transmission.frame_num() == nak_num.bitand(SEQ_MASK))
             .map(|index| self.transmissions.remove(index))
         {
             debug!("Retransmitting NAK'ed frame #{}", transmission.frame_num());
+            self.transmit(transmission).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Retransmit `DATA` frames whose acknowledgement timed out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if a frame exceeded its retransmission limit
+    /// or the retransmission itself failed, meaning the link should be reset.
+    async fn retransmit_timed_out(&mut self) -> io::Result<()> {
+        while let Some(transmission) = self
+            .transmissions
+            .iter()
+            .position(|transmission| transmission.is_timed_out(T_RX_ACK_MAX))
+            .map(|index| self.transmissions.remove(index))
+        {
+            debug!(
+                "Retransmitting timed-out frame #{} after {:?}",
+                transmission.frame_num(),
+                transmission.elapsed()
+            );
             self.transmit(transmission).await?;
         }
 
@@ -259,47 +332,22 @@ where
     }
 
     /// Returns the next frame number.
-    pub fn next_frame_number(&mut self) -> u8 {
+    fn next_frame_number(&mut self) -> u8 {
         let frame_number = self.frame_number;
         self.frame_number = self.frame_number.wrapping_add(1).bitand(SEQ_MASK);
         frame_number
     }
 
-    fn reject_message(message: Message, kind: ErrorKind, reason: &'static str) -> io::Result<()> {
-        if let Message::Payload { response_tx, .. } = message {
-            response_tx
-                .send(Err(io::Error::new(kind, reason)))
-                .unwrap_or_else(|_| {
-                    error!("Failed to send transmit result through response channel.");
-                });
+    /// Queue a message locally for a later retry, evicting the oldest entry
+    /// when full. An evicted payload wakes its caller with an error because
+    /// its response channel is dropped.
+    fn enqueue_pending(&mut self, message: Message) {
+        if self.pending.len() >= PENDING_CAPACITY {
+            if let Some(dropped) = self.pending.pop_front() {
+                warn!("Pending queue full, dropping oldest message: {dropped}");
+            }
         }
 
-        Err(io::Error::new(kind, reason))
-    }
-
-    async fn requeue(&self, message: Message) -> io::Result<()> {
-        let Some(sender) = self.requeue.upgrade() else {
-            return Self::reject_message(
-                message,
-                ErrorKind::BrokenPipe,
-                TRANSMITTER_CHANNEL_CLOSED,
-            );
-        };
-
-        sender.send(message).await.map_err(|error| {
-            let message = error.0;
-            if let Message::Payload { response_tx, .. } = message {
-                response_tx
-                    .send(Err(io::Error::new(
-                        ErrorKind::BrokenPipe,
-                        TRANSMITTER_CHANNEL_CLOSED,
-                    )))
-                    .unwrap_or_else(|_| {
-                        error!("Failed to send transmit result through response channel.");
-                    });
-            }
-
-            io::Error::new(ErrorKind::BrokenPipe, TRANSMITTER_CHANNEL_CLOSED)
-        })
+        self.pending.push_back(message);
     }
 }

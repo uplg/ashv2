@@ -54,8 +54,13 @@ where
             let maybe_frame = match self.buffer.read_frame().await {
                 Ok(maybe_frame) => maybe_frame,
                 Err(error) => {
-                    error!("Error receiving frame: {error}");
-                    continue;
+                    // Read errors are terminal: after an I/O error or EOF the
+                    // underlying stream stays exhausted, so `continue` would
+                    // busy-spin on the same error forever without yielding.
+                    // Exit instead so the caller can observe the dead task
+                    // and rebuild the transport.
+                    error!("Fatal error receiving frame, receiver exiting: {error}");
+                    break;
                 }
             };
 
@@ -125,7 +130,11 @@ where
             debug!("Received retransmission of data frame: {data}");
             self.send_ack().await?;
             self.ack_sent_frames(data.ack_num()).await?;
-            self.handle_payload(data.into_payload()).await;
+            // Do NOT forward the payload: the in-sequence branch above already
+            // handles a retransmission of a frame we never received, so any
+            // retransmission reaching this point is a duplicate of a payload
+            // that was already delivered. Forwarding it again would feed the
+            // EZSP decoder the same bytes twice and desynchronise it.
             return Ok(());
         }
 
@@ -153,8 +162,9 @@ where
         }
     }
 
-    async fn handle_rst(&self, rst: Rst) -> Result<(), SendError<Message>> {
+    async fn handle_rst(&mut self, rst: Rst) -> Result<(), SendError<Message>> {
         if let Ok(rst) = rst.validate() {
+            self.last_received_frame_num = None;
             self.transmitter.send(Message::Rst(rst)).await
         } else {
             warn!("Received RST with invalid CRC.");
@@ -162,8 +172,13 @@ where
         }
     }
 
-    async fn handle_rst_ack(&self, rst_ack: RstAck) -> Result<(), SendError<Message>> {
+    async fn handle_rst_ack(&mut self, rst_ack: RstAck) -> Result<(), SendError<Message>> {
         if let Ok(rst_ack) = rst_ack.validate() {
+            // Per the ASH specification, frame numbering restarts from zero on
+            // both sides after a reset. Without this, every post-reset DATA
+            // frame from the NCP would be seen as out-of-sequence and NAKed,
+            // wedging the link in a reset storm.
+            self.last_received_frame_num = None;
             self.transmitter.send(Message::RstAck(rst_ack)).await
         } else {
             warn!("Received RST-ACK with invalid CRC.");
