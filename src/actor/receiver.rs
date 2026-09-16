@@ -1,4 +1,3 @@
-use std::ops::BitAnd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
@@ -9,14 +8,16 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::SendError;
 
 use self::buffer::Buffer;
-use crate::SEQ_MASK;
 use crate::actor::message::Message;
 use crate::frame::{Ack, Data, Error, Frame, Nak, Rst, RstAck};
-use crate::protocol::Mask;
+use crate::protocol::{Mask, next_sequence_number};
 use crate::types::{MAX_FRAME_SIZE, Payload};
 use crate::validate::Validate;
 
 mod buffer;
+
+/// Expected frame number before the first DATA frame arrives.
+const INITIAL_ACK_NUMBER: u8 = 0;
 
 /// `ASHv2` receiver.
 #[derive(Debug)]
@@ -75,8 +76,7 @@ where
     /// This is equal to the last received frame number plus one.
     fn ack_number(&self) -> u8 {
         self.last_received_frame_num
-            .map_or(0x00, |frame_num| frame_num.wrapping_add(1))
-            .bitand(SEQ_MASK)
+            .map_or(INITIAL_ACK_NUMBER, next_sequence_number)
     }
 
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), SendError<Message>> {

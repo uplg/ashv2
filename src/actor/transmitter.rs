@@ -14,6 +14,7 @@ use self::buffer::Buffer;
 use self::transmission::Transmission;
 use crate::actor::message::Message;
 use crate::frame::{Ack, Data, Error, Nak, RST, Rst, RstAck};
+use crate::protocol::next_sequence_number;
 use crate::status::Status;
 use crate::types::{MAX_FRAME_SIZE, Payload};
 use crate::{SEQ_MASK, T_RSTACK_MAX_MILLIS, T_RX_ACK_MAX_MILLIS, TX_K};
@@ -135,7 +136,7 @@ where
         let data = Data::new(self.next_frame_number(), self.ack_number, *payload);
         // With a sliding windows size > 1 the NCP may enter an "ERROR: Assert" state when sending
         // fragmented messages if each DATA frame's ACK number is not increased.
-        self.ack_number = self.ack_number.wrapping_add(1).bitand(SEQ_MASK);
+        self.ack_number = next_sequence_number(self.ack_number);
         response
             .send(self.transmit(data.into()).await)
             .unwrap_or_else(|_| {
@@ -200,8 +201,7 @@ where
             .transmissions
             .iter()
             .position(|transmission| {
-                transmission.frame_num().wrapping_add(1).bitand(SEQ_MASK)
-                    == ack_num.bitand(SEQ_MASK)
+                next_sequence_number(transmission.frame_num()) == ack_num.bitand(SEQ_MASK)
             })
             .map(|index| self.transmissions.remove(index))
         {
@@ -261,9 +261,9 @@ where
     }
 
     /// Returns the next frame number.
-    pub fn next_frame_number(&mut self) -> u8 {
+    pub const fn next_frame_number(&mut self) -> u8 {
         let frame_number = self.frame_number;
-        self.frame_number = self.frame_number.wrapping_add(1).bitand(SEQ_MASK);
+        self.frame_number = next_sequence_number(self.frame_number);
         frame_number
     }
 
