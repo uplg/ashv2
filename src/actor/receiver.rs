@@ -51,21 +51,19 @@ where
         trace!("Starting receiver with frame size: {MAX_FRAME_SIZE}");
 
         while running.load(Relaxed) {
-            let maybe_frame = match self.buffer.read_frame().await {
-                Ok(maybe_frame) => maybe_frame,
+            let frame = match self.buffer.read_frame().await {
+                Ok(frame) => frame,
                 Err(error) => {
                     error!("Error receiving frame: {error}");
                     continue;
                 }
             };
 
-            if let Some(frame) = maybe_frame {
-                trace!("Received frame: {frame:#04X}");
+            trace!("Received frame: {frame:#04X}");
 
-                if let Err(error) = self.handle_frame(frame).await {
-                    info!("Transmitter channel closed, receiver exiting: {error}");
-                    break;
-                }
+            if let Err(error) = self.handle_frame(frame).await {
+                info!("Transmitter channel closed, receiver exiting: {error}");
+                break;
             }
         }
 

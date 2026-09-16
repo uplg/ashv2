@@ -57,8 +57,8 @@ where
     ///
     /// Returns an error if serial I/O fails, the byte stream ends before another frame is
     /// available, or the completed frame cannot be parsed.
-    pub async fn read_frame(&mut self) -> Result<Option<Frame>> {
-        self.read_raw_frame().await?.try_into().map(Some)
+    pub async fn read_frame(&mut self) -> Result<Frame> {
+        self.read_raw_frame().await?.try_into()
     }
 
     async fn read_raw_frame(&mut self) -> Result<Drain<'_, u8>> {
