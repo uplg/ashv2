@@ -193,9 +193,7 @@ where
 
     /// Remove `DATA` frames from the queue that have been acknowledged by the NCP.
     fn ack_sent_frames(&mut self, ack_num: u8) {
-        // Remove timed-out transmissions.
-        self.transmissions
-            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
+        self.remove_timed_out_transmissions();
 
         // Remove acknowledged transmissions.
         while let Some(transmission) = self
@@ -216,9 +214,7 @@ where
 
     /// Retransmit `DATA` frames that have been `NAK`ed by the NCP.
     async fn nak_sent_frames(&mut self, nak_num: u8) -> io::Result<()> {
-        // Remove timed-out transmissions.
-        self.transmissions
-            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
+        self.remove_timed_out_transmissions();
 
         // Retransmit NAK'ed transmission.
         if let Some(transmission) = self
@@ -232,6 +228,12 @@ where
         }
 
         Ok(())
+    }
+
+    /// Removes transmissions that have exceeded the acknowledgement timeout.
+    fn remove_timed_out_transmissions(&mut self) {
+        self.transmissions
+            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
     }
 
     /// Send a `DATA` frame.
