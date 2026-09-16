@@ -20,10 +20,10 @@ pub enum Message {
     },
 
     /// Send an ACK frame with the given ack number.
-    Ack(u8),
+    SendAck(u8),
 
     /// Send a NAK frame with the given ack number.
-    Nak(u8),
+    SendNak(u8),
 
     /// Received RST frame.
     Rst(Rst),
@@ -34,24 +34,24 @@ pub enum Message {
     /// Received ERROR frame.
     Error(Error),
 
-    /// Acknowledgement sent frames up to the given frame number.
-    AckSentFrame(u8),
+    /// Received acknowledgement carrying the peer's ACK number.
+    ReceivedAck(u8),
 
-    /// Negative Acknowledgement sent frames up to the given frame number.
-    NakSentFrame(u8),
+    /// Received negative acknowledgement carrying the peer's ACK number.
+    ReceivedNak(u8),
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Payload { payload, .. } => write!(f, "Payload({:#04X})", HexSlice::new(payload)),
-            Self::Ack(ack_num) => write!(f, "Ack({ack_num})"),
-            Self::Nak(ack_num) => write!(f, "Nak({ack_num})"),
+            Self::SendAck(ack_num) => write!(f, "SendAck({ack_num})"),
+            Self::SendNak(ack_num) => write!(f, "SendNak({ack_num})"),
             Self::Rst(rst) => write!(f, "Rst({rst})"),
             Self::RstAck(rst_ack) => write!(f, "RstAck({rst_ack})"),
             Self::Error(error) => write!(f, "Error({error})"),
-            Self::AckSentFrame(ack_num) => write!(f, "AckSentFrame({ack_num})"),
-            Self::NakSentFrame(ack_num) => write!(f, "NakSentFrame({ack_num})"),
+            Self::ReceivedAck(ack_num) => write!(f, "ReceivedAck({ack_num})"),
+            Self::ReceivedNak(ack_num) => write!(f, "ReceivedNak({ack_num})"),
         }
     }
 }

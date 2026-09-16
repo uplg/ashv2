@@ -136,7 +136,7 @@ sequenceDiagram
     H->>T: Message::Payload
     T->>S: DATA(frame, masked payload)
     S->>R: inbound frame bytes
-    R->>T: Message::AckSentFrame / NakSentFrame
+    R->>T: Message::ReceivedAck / ReceivedNak
     R->>Q: unmasked payload
     Q->>A: Payload
 ```

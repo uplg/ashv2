@@ -104,16 +104,16 @@ where
                 payload,
                 response_tx: response,
             } => self.handle_payload(payload, response).await,
-            Message::Ack(ack_num) => self.send_ack(ack_num).await,
-            Message::Nak(ack_num) => self.send_nak(ack_num).await,
+            Message::SendAck(ack_num) => self.send_ack(ack_num).await,
+            Message::SendNak(ack_num) => self.send_nak(ack_num).await,
             Message::Rst(rst) => self.handle_rst(rst).await,
             Message::RstAck(rst_ack) => self.handle_rst_ack(rst_ack).await,
             Message::Error(error) => self.handle_error(error).await,
-            Message::AckSentFrame(frame_num) => {
-                self.ack_sent_frames(frame_num);
+            Message::ReceivedAck(ack_num) => {
+                self.ack_sent_frames(ack_num);
                 Ok(())
             }
-            Message::NakSentFrame(frame_num) => self.nak_sent_frames(frame_num).await,
+            Message::ReceivedNak(ack_num) => self.nak_sent_frames(ack_num).await,
         }
     }
 

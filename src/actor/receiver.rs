@@ -179,21 +179,25 @@ where
 
     /// Send an `ACK` frame.
     async fn send_ack(&self) -> Result<(), SendError<Message>> {
-        self.transmitter.send(Message::Ack(self.ack_number())).await
+        self.transmitter
+            .send(Message::SendAck(self.ack_number()))
+            .await
     }
 
     /// Send a `NAK` frame.
     async fn send_nak(&self) -> Result<(), SendError<Message>> {
-        self.transmitter.send(Message::Nak(self.ack_number())).await
+        self.transmitter
+            .send(Message::SendNak(self.ack_number()))
+            .await
     }
 
     /// Acknowledge sent frames up to `ack_num`.
     async fn ack_sent_frames(&self, ack_num: u8) -> Result<(), SendError<Message>> {
-        self.transmitter.send(Message::AckSentFrame(ack_num)).await
+        self.transmitter.send(Message::ReceivedAck(ack_num)).await
     }
 
     /// Negative acknowledge sent frames up to `ack_num`.
     async fn nak_sent_frames(&self, ack_num: u8) -> Result<(), SendError<Message>> {
-        self.transmitter.send(Message::NakSentFrame(ack_num)).await
+        self.transmitter.send(Message::ReceivedNak(ack_num)).await
     }
 }
