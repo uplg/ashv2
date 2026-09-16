@@ -265,7 +265,8 @@ where
         frame_number
     }
 
-    fn reject_message(message: Message, kind: ErrorKind, reason: &'static str) -> io::Result<()> {
+    /// Rejects a queued payload and returns the same failure to the transmitter.
+    fn reject_message(message: Message, kind: ErrorKind, reason: &'static str) -> io::Error {
         if let Message::Payload { response_tx, .. } = message {
             response_tx
                 .send(Err(io::Error::new(kind, reason)))
@@ -274,32 +275,20 @@ where
                 });
         }
 
-        Err(io::Error::new(kind, reason))
+        io::Error::new(kind, reason)
     }
 
     async fn requeue(&self, message: Message) -> io::Result<()> {
         let Some(sender) = self.requeue.upgrade() else {
-            return Self::reject_message(
+            return Err(Self::reject_message(
                 message,
                 ErrorKind::BrokenPipe,
                 TRANSMITTER_CHANNEL_CLOSED,
-            );
+            ));
         };
 
         sender.send(message).await.map_err(|error| {
-            let message = error.0;
-            if let Message::Payload { response_tx, .. } = message {
-                response_tx
-                    .send(Err(io::Error::new(
-                        ErrorKind::BrokenPipe,
-                        TRANSMITTER_CHANNEL_CLOSED,
-                    )))
-                    .unwrap_or_else(|_| {
-                        error!("Failed to send transmit result through response channel.");
-                    });
-            }
-
-            io::Error::new(ErrorKind::BrokenPipe, TRANSMITTER_CHANNEL_CLOSED)
+            Self::reject_message(error.0, ErrorKind::BrokenPipe, TRANSMITTER_CHANNEL_CLOSED)
         })
     }
 }
