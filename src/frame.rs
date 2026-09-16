@@ -130,6 +130,22 @@ impl Validate for Frame {
     }
 }
 
+/// Reads a required frame byte, reporting truncated input as an EOF error.
+fn read_byte<I>(bytes: &mut I) -> io::Result<u8>
+where
+    I: Iterator<Item = u8>,
+{
+    bytes.next().ok_or_else(|| ErrorKind::UnexpectedEof.into())
+}
+
+/// Reads the two-byte, big-endian CRC at the current position.
+fn read_crc<I>(bytes: &mut I) -> io::Result<u16>
+where
+    I: Iterator<Item = u8>,
+{
+    Ok(u16::from_be_bytes([read_byte(bytes)?, read_byte(bytes)?]))
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
 mod tests {

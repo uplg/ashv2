@@ -1,11 +1,12 @@
 //! Acknowledgement (`ACK`) frame implementation.
 
 use core::fmt::{Display, Formatter, LowerHex, UpperHex};
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error};
 use std::iter::{Chain, Once, Peekable, once};
 use std::vec::Drain;
 
 use super::headers::nak::Header;
+use super::{read_byte, read_crc};
 use crate::hex_slice::HexSlice;
 use crate::validate::{CRC, Validate};
 
@@ -75,19 +76,12 @@ impl TryFrom<Peekable<Drain<'_, u8>>> for Nak {
     type Error = Error;
 
     fn try_from(mut buffer: Peekable<Drain<'_, u8>>) -> io::Result<Self> {
-        let header = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let crc0 = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let crc1 = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
+        let header = read_byte(&mut buffer)?;
+        let crc = read_crc(&mut buffer)?;
 
         Ok(Self {
             header: Header::from_bits_retain(header),
-            crc: u16::from_be_bytes([crc0, crc1]),
+            crc,
         })
     }
 }

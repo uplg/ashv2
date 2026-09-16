@@ -1,12 +1,13 @@
 //! Reset acknowledgment (`RST_ACK`) frame implementation.
 
 use core::fmt::{Display, Formatter, LowerHex, UpperHex};
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error};
 use std::iter::{Chain, Peekable};
 use std::vec::Drain;
 
 use num_traits::FromPrimitive;
 
+use super::{read_byte, read_crc};
 use crate::VERSION;
 use crate::code::Code;
 use crate::hex_slice::HexSlice;
@@ -83,27 +84,16 @@ impl TryFrom<Peekable<Drain<'_, u8>>> for RstAck {
     type Error = Error;
 
     fn try_from(mut buffer: Peekable<Drain<'_, u8>>) -> io::Result<Self> {
-        let header = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let version = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let reset_code = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let crc0 = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
-        let crc1 = buffer
-            .next()
-            .ok_or_else(|| Error::from(ErrorKind::UnexpectedEof))?;
+        let header = read_byte(&mut buffer)?;
+        let version = read_byte(&mut buffer)?;
+        let reset_code = read_byte(&mut buffer)?;
+        let crc = read_crc(&mut buffer)?;
 
         Ok(Self {
             header,
             version,
             reset_code,
-            crc: u16::from_be_bytes([crc0, crc1]),
+            crc,
         })
     }
 }
