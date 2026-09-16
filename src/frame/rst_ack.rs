@@ -26,9 +26,9 @@ impl RstAck {
     /// Constant header value for `RST_ACK` frames.
     pub const HEADER: u8 = 0xC1;
 
-    /// Returns the protocol version.
+    /// Returns the protocol version reported by the peer.
     ///
-    /// This is statically set to `0x02` (2) for `ASHv2`.
+    /// Use [`Self::is_ash_v2`] to check whether the reported version is supported.
     #[must_use]
     pub const fn version(self) -> u8 {
         self.version

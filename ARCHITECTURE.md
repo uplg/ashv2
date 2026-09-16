@@ -252,7 +252,7 @@ sequenceDiagram
 
 - Sliding window capacity is `TX_K` (default `5`), stored in a fixed-capacity queue.
 - Payload requests are requeued without delay when the sliding window is full.
-- Payload sends fail with `ErrorKind::NotConnected` until the initial reset handshake completes.
+- Payload requests remain queued until the initial reset handshake completes.
 - Each queued transmission tracks:
   - send time (`Instant`),
   - frame number,

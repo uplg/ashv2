@@ -38,6 +38,18 @@ use const_env::env_item;
 pub use self::actor::{Futures, Handle, start};
 pub use self::types::Payload;
 
+mod actor;
+mod code;
+#[cfg(feature = "ezsp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ezsp")))]
+pub mod ezsp;
+mod frame;
+mod hex_slice;
+mod protocol;
+mod status;
+mod types;
+mod validate;
+
 /// Maximum payload size in bytes.
 #[env_item("ASHV2_MAX_PAYLOAD_SIZE")]
 pub const MAX_PAYLOAD_SIZE: usize = 128;
@@ -56,15 +68,3 @@ const T_RX_ACK_MAX_MILLIS: u64 = 3200;
 const VERSION: u8 = 0x02;
 
 const SEQ_MASK: u8 = 0b0000_0111;
-
-mod actor;
-mod code;
-#[cfg(feature = "ezsp")]
-#[cfg_attr(docsrs, doc(cfg(feature = "ezsp")))]
-pub mod ezsp;
-mod frame;
-mod hex_slice;
-mod protocol;
-mod status;
-mod types;
-mod validate;

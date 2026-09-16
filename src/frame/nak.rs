@@ -1,4 +1,4 @@
-//! Acknowledgement (`ACK`) frame implementation.
+//! Negative acknowledgement (`NAK`) frame implementation.
 
 use core::fmt::{Display, Formatter, LowerHex, UpperHex};
 use std::io::{self, Error};
