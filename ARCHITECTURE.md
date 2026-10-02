@@ -86,7 +86,7 @@ On startup it sends `RST`, waits for `RST-ACK`, and only then handles payload tr
 stateDiagram-v2
     [*] --> Uninitialized
     Uninitialized --> Connected: valid RST-ACK (version=2, in time)
-    Uninitialized --> Uninitialized: resend RST / requeue messages
+    Uninitialized --> Uninitialized: resend RST / keep payloads pending
     Connected --> Failed: I/O error or inbound RST/ERROR
     Failed --> Uninitialized: reset() sends RST
     Connected --> Connected: DATA/ACK/NAK exchange
@@ -154,8 +154,8 @@ type parameters, so spawning either future with `tokio::spawn` requires both typ
 The receiver buffer reads chunks directly from the supplied reader and retains bytes after a
 completed frame for the next read. The transmitter buffer writes fully encoded and stuffed frames
 through the supplied writer. The receiver stores its channels and acknowledgement state in
-`FrameHandler`, which its async methods can borrow independently of the read buffer. Requeueing
-on the transmit side borrows the queue sender independently of the write buffer.
+`FrameHandler`, which its async methods can borrow independently of the read buffer. The
+transmitter keeps payloads it cannot send yet in its own bounded pending queue, never in its inbox.
 
 ```mermaid
 flowchart TD
@@ -257,8 +257,11 @@ sequenceDiagram
 ## Reliability and Retransmission Model
 
 - Sliding window capacity is `TX_K` (default `5`), stored in a fixed-capacity queue.
-- Payload requests are requeued without delay when the sliding window is full.
-- Payload requests remain queued until the initial reset handshake completes.
+- Payload requests wait in a local, bounded pending queue (64 entries, oldest evicted with an
+  error) while the link is down or the sliding window is full, and are sent in order as soon as
+  the window frees up. The transmitter never sends into its own inbox, which would deadlock it.
+- While payloads are pending, a 100 ms housekeeping tick keeps retrying the reset handshake and
+  draining the pending queue. Link-control messages received while disconnected are dropped.
 - Each queued transmission tracks:
   - send time (`Instant`),
   - frame number,
