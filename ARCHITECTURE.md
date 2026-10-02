@@ -119,6 +119,7 @@ stateDiagram-v2
 5. Parsed bytes are converted into a typed frame and CRC-validated.
 6. Receiver behavior by frame type:
    - `DATA`: sequence check, send `ACK` or `NAK`, unmask payload, forward to response channel.
+     Out-of-sequence retransmissions are duplicates: they are `ACK`ed but not forwarded again.
    - `ACK`: notify transmitter to retire sent frames up to ACK number.
    - `NAK`: notify transmitter to retransmit matching sent frame.
    - `RST`, `RST-ACK`, `ERROR`: forward to transmitter for connection-state handling.
