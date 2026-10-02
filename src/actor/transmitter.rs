@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::io::ErrorKind;
 use std::ops::BitAnd;
@@ -8,12 +9,15 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, trace, warn};
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc::{Receiver, WeakSender};
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use self::buffer::Buffer;
 use self::transmission::Transmission;
 use crate::actor::message::Message;
 use crate::frame::{Ack, Data, Error, Nak, RST, Rst, RstAck};
+use crate::hex_slice::HexSlice;
 use crate::protocol::next_sequence_number;
 use crate::status::Status;
 use crate::types::{MAX_FRAME_SIZE, Payload};
@@ -27,14 +31,26 @@ const T_RSTACK_MAX: Duration = Duration::from_millis(T_RSTACK_MAX_MILLIS);
 
 const T_RX_ACK_MAX: Duration = Duration::from_millis(T_RX_ACK_MAX_MILLIS);
 
-const TRANSMITTER_CHANNEL_CLOSED: &str = "ASHv2 transmitter channel is closed";
+/// Delay between housekeeping ticks while the transmitter has a backlog.
+const TICK_DELAY: Duration = Duration::from_millis(100);
+
+/// Maximum number of payloads held in the local pending queue.
+///
+/// The pending queue holds payloads that cannot be transmitted yet, because the link is down or
+/// the transmission window is full. It is local to the transmitter on purpose: the transmitter
+/// must never send into its own bounded input channel, since it is the only consumer of that
+/// channel and would deadlock as soon as the channel is full.
+const PENDING_CAPACITY: usize = 64;
+
+/// A payload waiting for a free transmission slot, with its caller's response channel.
+type PendingPayload = (Box<Payload>, oneshot::Sender<io::Result<()>>);
 
 /// `ASHv2` transmitter.
 #[derive(Debug)]
 pub struct Transmitter<T> {
     buffer: Buffer<T>,
     messages: Receiver<Message>,
-    requeue: WeakSender<Message>,
+    pending: VecDeque<PendingPayload>,
     status: Status,
     last_rst_sent: Option<Instant>,
     transmissions: heapless::Vec<Transmission, TX_K>,
@@ -45,11 +61,11 @@ pub struct Transmitter<T> {
 impl<T> Transmitter<T> {
     /// Creates a new `ASHv2` transmitter.
     #[must_use]
-    pub const fn new(writer: T, messages: Receiver<Message>, requeue: WeakSender<Message>) -> Self {
+    pub const fn new(writer: T, messages: Receiver<Message>) -> Self {
         Self {
             buffer: Buffer::new(writer),
             messages,
-            requeue,
+            pending: VecDeque::new(),
             status: Status::Uninitialized,
             last_rst_sent: None,
             transmissions: heapless::Vec::new(),
@@ -70,10 +86,21 @@ where
             error!("Failed to send initial RST frame: {error}");
         });
 
-        while let Some(message) = self.messages.recv().await {
-            trace!("Received message: {message}");
+        loop {
+            let result = if self.has_backlog() {
+                match timeout(TICK_DELAY, self.messages.recv()).await {
+                    Ok(Some(message)) => self.handle_message(message).await,
+                    Ok(None) => break,
+                    Err(_) => self.tick().await,
+                }
+            } else {
+                let Some(message) = self.messages.recv().await else {
+                    break;
+                };
+                self.handle_message(message).await
+            };
 
-            if let Err(error) = self.handle_message(message).await {
+            if let Err(error) = result {
                 error!("Resetting connection due to I/O error: {error}");
                 self.status = Status::Failed;
             }
@@ -83,14 +110,38 @@ where
         info!("Transmitter loop terminated.");
     }
 
-    async fn handle_message(&mut self, message: Message) -> io::Result<()> {
-        if self.status != Status::Connected {
-            if let Message::RstAck(ack) = message {
-                return self.handle_rst_ack(ack).await;
-            }
+    /// Returns `true` if there is work that requires periodic housekeeping.
+    fn has_backlog(&self) -> bool {
+        !self.pending.is_empty()
+    }
 
-            trace!("Received message before connection was established. Re-queueing.");
-            self.requeue(message).await?;
+    /// Periodic housekeeping while there is a backlog.
+    ///
+    /// Keeps trying to (re-)establish the connection while payloads are pending, and transmits
+    /// pending payloads once there is room in the transmission window.
+    async fn tick(&mut self) -> io::Result<()> {
+        if self.status != Status::Connected {
+            return self.reset().await;
+        }
+
+        self.flush_pending().await
+    }
+
+    async fn handle_message(&mut self, message: Message) -> io::Result<()> {
+        trace!("Received message: {message}");
+
+        if self.status != Status::Connected {
+            match message {
+                Message::RstAck(ack) => return self.handle_rst_ack(ack).await,
+                // Keep payloads for delivery after the connection has been established.
+                Message::Payload {
+                    payload,
+                    response_tx,
+                } => self.enqueue_pending(payload, response_tx),
+                // Link-control messages refer to the frame space of the previous session.
+                // Replaying them after reconnection would only corrupt the new session.
+                other => trace!("Dropping link-control message while disconnected: {other}"),
+            }
 
             // Only log if the connection has failed, not if it hasn't been established yet.
             if self.status == Status::Failed {
@@ -103,8 +154,12 @@ where
         match message {
             Message::Payload {
                 payload,
-                response_tx: response,
-            } => self.handle_payload(payload, response).await,
+                response_tx,
+            } => {
+                // Always go through the pending queue to preserve the payloads' order.
+                self.enqueue_pending(payload, response_tx);
+                self.flush_pending().await
+            }
             Message::SendAck(ack_num) => self.send_ack(ack_num).await,
             Message::SendNak(ack_num) => self.send_nak(ack_num).await,
             Message::Rst(rst) => self.handle_rst(rst).await,
@@ -112,27 +167,36 @@ where
             Message::Error(error) => self.handle_error(error).await,
             Message::ReceivedAck(ack_num) => {
                 self.ack_sent_frames(ack_num);
-                Ok(())
+                self.flush_pending().await
             }
             Message::ReceivedNak(ack_num) => self.nak_sent_frames(ack_num).await,
         }
     }
 
-    async fn handle_payload(
-        &mut self,
-        payload: Box<Payload>,
-        response: tokio::sync::oneshot::Sender<io::Result<()>>,
-    ) -> io::Result<()> {
-        if self.transmissions.is_full() {
-            warn!("Insufficient space in transmission queue for payload, requeueing.");
-            return self
-                .requeue(Message::Payload {
-                    payload,
-                    response_tx: response,
-                })
-                .await;
+    /// Transmit pending payloads while connected and the transmission window has room.
+    async fn flush_pending(&mut self) -> io::Result<()> {
+        while self.status == Status::Connected
+            && !self.transmissions.is_full()
+            && let Some((payload, response)) = self.pending.pop_front()
+        {
+            self.send_payload(payload, response).await?;
         }
 
+        if !self.pending.is_empty() {
+            trace!("{} payload(s) pending transmission.", self.pending.len());
+        }
+
+        Ok(())
+    }
+
+    /// Transmit a payload as a new `DATA` frame.
+    ///
+    /// The caller must make sure that there is room in the transmission window.
+    async fn send_payload(
+        &mut self,
+        payload: Box<Payload>,
+        response: oneshot::Sender<io::Result<()>>,
+    ) -> io::Result<()> {
         let data = Data::new(self.next_frame_number(), self.ack_number, *payload);
         // With a sliding windows size > 1 the NCP may enter an "ERROR: Assert" state when sending
         // fragmented messages if each DATA frame's ACK number is not increased.
@@ -174,7 +238,7 @@ where
             if timestamp.elapsed() < T_RSTACK_MAX {
                 debug!("Connection established successfully.");
                 self.status = Status::Connected;
-                Ok(())
+                self.flush_pending().await
             } else {
                 warn!("RST ACK received after timeout. Resetting connection again.");
                 self.reset().await
@@ -267,30 +331,177 @@ where
         frame_number
     }
 
-    /// Rejects a queued payload and returns the same failure to the transmitter.
-    fn reject_message(message: Message, kind: ErrorKind, reason: &'static str) -> io::Error {
-        if let Message::Payload { response_tx, .. } = message {
-            response_tx
-                .send(Err(io::Error::new(kind, reason)))
+    /// Queue a payload locally until it can be transmitted.
+    ///
+    /// If the queue is full, the oldest payload is dropped and its caller is notified.
+    fn enqueue_pending(
+        &mut self,
+        payload: Box<Payload>,
+        response: oneshot::Sender<io::Result<()>>,
+    ) {
+        if self.pending.len() >= PENDING_CAPACITY
+            && let Some((dropped, response)) = self.pending.pop_front()
+        {
+            warn!(
+                "Pending queue full, dropping oldest payload: {:#04X}",
+                HexSlice::new(&dropped)
+            );
+            response
+                .send(Err(io::Error::new(
+                    ErrorKind::OutOfMemory,
+                    "ASHv2 pending queue is full",
+                )))
                 .unwrap_or_else(|_| {
                     error!("Failed to send transmit result through response channel.");
                 });
         }
 
-        io::Error::new(kind, reason)
+        self.pending.push_back((payload, response));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::io::{self, ErrorKind};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use tokio::io::{Sink, sink};
+    use tokio::runtime::Builder;
+    use tokio::sync::mpsc::channel;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    use super::{PENDING_CAPACITY, Transmitter};
+    use crate::actor::message::Message;
+    use crate::frame::RstAck;
+    use crate::status::Status;
+    use crate::types::Payload;
+
+    const RST_ACK_BYTES: [u8; 5] = [0xC1, 0x02, 0x02, 0x9B, 0x7B];
+    const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime should build")
+            .block_on(future)
     }
 
-    async fn requeue(&self, message: Message) -> io::Result<()> {
-        let Some(sender) = self.requeue.upgrade() else {
-            return Err(Self::reject_message(
-                message,
-                ErrorKind::BrokenPipe,
-                TRANSMITTER_CHANNEL_CLOSED,
-            ));
-        };
+    #[expect(
+        clippy::iter_with_drain,
+        reason = "RstAck is parsed from a drained buffer"
+    )]
+    fn rst_ack() -> RstAck {
+        let mut bytes = RST_ACK_BYTES.to_vec();
+        RstAck::try_from(bytes.drain(..).peekable()).expect("reference RSTACK should parse")
+    }
 
-        sender.send(message).await.map_err(|error| {
-            Self::reject_message(error.0, ErrorKind::BrokenPipe, TRANSMITTER_CHANNEL_CLOSED)
-        })
+    fn transmitter() -> Transmitter<Sink> {
+        let (_sender, inbox) = channel(1);
+        Transmitter::new(sink(), inbox)
+    }
+
+    fn payload() -> (Message, oneshot::Receiver<io::Result<()>>) {
+        let (response_tx, response_rx) = oneshot::channel();
+        let message = Message::Payload {
+            payload: Box::new(Payload::new()),
+            response_tx,
+        };
+        (message, response_rx)
+    }
+
+    /// Connect the transmitter as if the NCP had answered our RST.
+    async fn connect(transmitter: &mut Transmitter<Sink>) {
+        transmitter.reset().await.expect("RST should be written");
+        transmitter
+            .handle_message(Message::RstAck(rst_ack()))
+            .await
+            .expect("RSTACK should be handled");
+        assert_eq!(transmitter.status, Status::Connected);
+    }
+
+    #[test]
+    fn keeps_draining_inbox_while_disconnected() {
+        block_on(async {
+            // A capacity of one is the worst case for a transmitter that re-queues into its own
+            // inbox: it would block on its own full channel and never receive again.
+            let (sender, inbox) = channel(1);
+            let running = Arc::new(AtomicBool::new(true));
+            let task = tokio::spawn(Transmitter::new(sink(), inbox).run(running));
+
+            for _ in 0..2 * PENDING_CAPACITY {
+                let (message, _response) = payload();
+                timeout(TEST_TIMEOUT, sender.send(message))
+                    .await
+                    .expect("transmitter must keep draining its inbox")
+                    .expect("transmitter inbox should be open");
+            }
+
+            drop(sender);
+            timeout(TEST_TIMEOUT, task)
+                .await
+                .expect("transmitter should terminate")
+                .expect("transmitter should not panic");
+        });
+    }
+
+    #[test]
+    fn queues_payloads_until_connected() {
+        block_on(async {
+            let mut transmitter = transmitter();
+            let (message, mut response) = payload();
+            transmitter
+                .handle_message(message)
+                .await
+                .expect("payload should be queued");
+            assert_eq!(transmitter.pending.len(), 1);
+            assert!(response.try_recv().is_err());
+
+            connect(&mut transmitter).await;
+            assert!(transmitter.pending.is_empty());
+            assert_eq!(transmitter.transmissions.len(), 1);
+            assert!(matches!(response.try_recv(), Ok(Ok(()))));
+        });
+    }
+
+    #[test]
+    fn drops_link_control_messages_while_disconnected() {
+        block_on(async {
+            let mut transmitter = transmitter();
+            transmitter
+                .handle_message(Message::SendAck(3))
+                .await
+                .expect("message should be handled");
+            assert!(transmitter.pending.is_empty());
+        });
+    }
+
+    #[test]
+    fn evicts_oldest_pending_payload_when_full() {
+        block_on(async {
+            let mut transmitter = transmitter();
+            let mut responses = Vec::new();
+
+            for _ in 0..=PENDING_CAPACITY {
+                let (message, response) = payload();
+                transmitter
+                    .handle_message(message)
+                    .await
+                    .expect("payload should be queued");
+                responses.push(response);
+            }
+
+            assert_eq!(transmitter.pending.len(), PENDING_CAPACITY);
+            let error = responses[0]
+                .try_recv()
+                .expect("evicted payload should be answered")
+                .expect_err("evicted payload should be rejected");
+            assert_eq!(error.kind(), ErrorKind::OutOfMemory);
+            assert!(responses[1].try_recv().is_err());
+        });
     }
 }

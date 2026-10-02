@@ -44,7 +44,7 @@ where
     let (sender, inbox) = channel(response.capacity());
     let running = Arc::new(AtomicBool::new(true));
     let receiver = Receiver::new(reader, response, sender.clone()).run(running.clone());
-    let transmitter = Transmitter::new(writer, inbox, sender.downgrade()).run(running);
+    let transmitter = Transmitter::new(writer, inbox).run(running);
     let futures = Futures {
         transmitter,
         receiver,
