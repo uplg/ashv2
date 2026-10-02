@@ -112,18 +112,20 @@ where
 
     /// Returns `true` if there is work that requires periodic housekeeping.
     fn has_backlog(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.transmissions.is_empty()
     }
 
     /// Periodic housekeeping while there is a backlog.
     ///
-    /// Keeps trying to (re-)establish the connection while payloads are pending, and transmits
-    /// pending payloads once there is room in the transmission window.
+    /// Keeps trying to (re-)establish the connection while payloads are pending, retransmits
+    /// `DATA` frames whose acknowledgement timed out, and transmits pending payloads once there
+    /// is room in the transmission window.
     async fn tick(&mut self) -> io::Result<()> {
         if self.status != Status::Connected {
             return self.reset().await;
         }
 
+        self.retransmit_timed_out().await?;
         self.flush_pending().await
     }
 
@@ -264,8 +266,6 @@ where
 
     /// Remove `DATA` frames from the queue that have been acknowledged by the NCP.
     fn ack_sent_frames(&mut self, ack_num: u8) {
-        self.remove_timed_out_transmissions();
-
         // Remove acknowledged transmissions.
         while let Some(transmission) = self
             .transmissions
@@ -284,8 +284,6 @@ where
 
     /// Retransmit `DATA` frames that have been `NAK`ed by the NCP.
     async fn nak_sent_frames(&mut self, nak_num: u8) -> io::Result<()> {
-        self.remove_timed_out_transmissions();
-
         // Retransmit NAK'ed transmission.
         if let Some(transmission) = self
             .transmissions
@@ -300,10 +298,28 @@ where
         Ok(())
     }
 
-    /// Removes transmissions that have exceeded the acknowledgement timeout.
-    fn remove_timed_out_transmissions(&mut self) {
-        self.transmissions
-            .retain(|transmission| !transmission.is_timed_out(T_RX_ACK_MAX));
+    /// Retransmit `DATA` frames whose acknowledgement timed out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if a frame exceeded its retransmission limit or the
+    /// retransmission itself failed, meaning that the connection must be reset.
+    async fn retransmit_timed_out(&mut self) -> io::Result<()> {
+        while let Some(transmission) = self
+            .transmissions
+            .iter()
+            .position(|transmission| transmission.is_timed_out(T_RX_ACK_MAX))
+            .map(|index| self.transmissions.remove(index))
+        {
+            debug!(
+                "Retransmitting timed-out frame #{} after {:?}",
+                transmission.frame_num(),
+                transmission.elapsed()
+            );
+            self.transmit(transmission).await?;
+        }
+
+        Ok(())
     }
 
     /// Send a `DATA` frame.
@@ -380,7 +396,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::timeout;
 
-    use super::{PENDING_CAPACITY, Transmitter};
+    use super::{PENDING_CAPACITY, T_RX_ACK_MAX, Transmitter};
     use crate::actor::message::Message;
     use crate::frame::RstAck;
     use crate::status::Status;
@@ -495,6 +511,47 @@ mod tests {
             assert_eq!(transmitter.frame_number, 0);
             assert_eq!(transmitter.ack_number, 0);
             assert!(transmitter.transmissions.is_empty());
+        });
+    }
+
+    #[test]
+    fn retransmits_timed_out_frames() {
+        block_on(async {
+            let mut transmitter = transmitter();
+            connect(&mut transmitter).await;
+            let (message, _response) = payload();
+            transmitter
+                .handle_message(message)
+                .await
+                .expect("payload should be sent");
+
+            // An ACK for another frame must not silently drop the timed-out frame.
+            transmitter.transmissions[0].backdate(2 * T_RX_ACK_MAX);
+            transmitter
+                .handle_message(Message::ReceivedAck(0))
+                .await
+                .expect("ACK should be handled");
+            assert_eq!(transmitter.transmissions.len(), 1);
+
+            transmitter
+                .tick()
+                .await
+                .expect("frame should be retransmitted");
+            assert_eq!(transmitter.transmissions.len(), 1);
+            assert!(transmitter.transmissions[0].is_retransmission());
+            assert!(!transmitter.transmissions[0].is_timed_out(T_RX_ACK_MAX));
+
+            transmitter.transmissions[0].backdate(2 * T_RX_ACK_MAX);
+            transmitter
+                .tick()
+                .await
+                .expect("frame should be retransmitted");
+            transmitter.transmissions[0].backdate(2 * T_RX_ACK_MAX);
+            let error = transmitter
+                .tick()
+                .await
+                .expect_err("retransmission limit should be exceeded");
+            assert_eq!(error.kind(), ErrorKind::TimedOut);
         });
     }
 

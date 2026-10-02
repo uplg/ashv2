@@ -43,6 +43,8 @@ impl Transmission {
     /// Returns an [`Error`] if the retransmission limit is exceeded.
     pub fn data_for_transmit(&mut self) -> io::Result<&Data> {
         self.transmits += 1;
+        // The acknowledgement timeout runs from the latest (re-)transmission.
+        self.sent = Instant::now();
 
         if self.transmits > 1 {
             self.data.set_is_retransmission(true);
@@ -59,6 +61,19 @@ impl Transmission {
         }
 
         Ok(&self.data)
+    }
+}
+
+#[cfg(test)]
+impl Transmission {
+    /// Pretend that the frame was sent `duration` earlier.
+    pub fn backdate(&mut self, duration: Duration) {
+        self.sent -= duration;
+    }
+
+    /// Return `true` if the frame is marked as a retransmission.
+    pub const fn is_retransmission(&self) -> bool {
+        self.data.is_retransmission()
     }
 }
 
