@@ -36,6 +36,8 @@ Important behavior details:
 - The transmitter terminates after every `Handle` clone has been dropped and the outbound message
   queue has been drained. There is no terminate message.
 - When the transmitter terminates, it signals the receiver to terminate as well.
+- The receiver future completes when the reader fails or reaches the end of its stream; invalid
+  frames are discarded. Watch the receiver future to detect a dead transport.
 - `Handle::send(payload).await` confirms local transmission attempt (I/O success), not the remote ASH response payload.
 - Payload requests made before the ASH link is established remain queued while the initial reset
   handshake is driven.
