@@ -151,8 +151,9 @@ where
         }
     }
 
-    async fn handle_rst(&self, rst: Rst) -> Result<(), SendError<Message>> {
+    async fn handle_rst(&mut self, rst: Rst) -> Result<(), SendError<Message>> {
         if let Ok(rst) = rst.validate() {
+            self.restart_frame_numbering();
             self.transmitter.send(Message::Rst(rst)).await
         } else {
             warn!("Received RST with invalid CRC.");
@@ -160,13 +161,23 @@ where
         }
     }
 
-    async fn handle_rst_ack(&self, rst_ack: RstAck) -> Result<(), SendError<Message>> {
+    async fn handle_rst_ack(&mut self, rst_ack: RstAck) -> Result<(), SendError<Message>> {
         if let Ok(rst_ack) = rst_ack.validate() {
+            self.restart_frame_numbering();
             self.transmitter.send(Message::RstAck(rst_ack)).await
         } else {
             warn!("Received RST-ACK with invalid CRC.");
             Ok(())
         }
+    }
+
+    /// Restart the expected frame numbering after a reset.
+    ///
+    /// Per the ASH specification, frame numbering restarts from zero on both sides after a
+    /// reset. Without this, every post-reset `DATA` frame from the NCP would be considered
+    /// out of sequence and `NAK`ed, wedging the link.
+    const fn restart_frame_numbering(&mut self) {
+        self.last_received_frame_num = None;
     }
 
     /// Send the response frame's payload through the response channel.
@@ -199,5 +210,63 @@ where
     /// Negative acknowledge sent frames up to `ack_num`.
     async fn nak_sent_frames(&self, ack_num: u8) -> Result<(), SendError<Message>> {
         self.transmitter.send(Message::ReceivedNak(ack_num)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{Empty, empty};
+    use tokio::runtime::Builder;
+    use tokio::sync::mpsc::{Receiver as MpscReceiver, channel};
+
+    use super::Receiver;
+    use crate::actor::message::Message;
+    use crate::frame::RstAck;
+    use crate::types::Payload;
+
+    const RST_ACK_BYTES: [u8; 5] = [0xC1, 0x02, 0x02, 0x9B, 0x7B];
+    const CHANNEL_SIZE: usize = 8;
+
+    #[expect(
+        clippy::iter_with_drain,
+        reason = "RstAck is parsed from a drained buffer"
+    )]
+    fn rst_ack() -> RstAck {
+        let mut bytes = RST_ACK_BYTES.to_vec();
+        RstAck::try_from(bytes.drain(..).peekable()).expect("reference RSTACK should parse")
+    }
+
+    fn receiver() -> (
+        Receiver<Empty>,
+        MpscReceiver<Payload>,
+        MpscReceiver<Message>,
+    ) {
+        let (response_tx, response_rx) = channel(CHANNEL_SIZE);
+        let (transmitter_tx, transmitter_rx) = channel(CHANNEL_SIZE);
+        (
+            Receiver::new(empty(), response_tx, transmitter_tx),
+            response_rx,
+            transmitter_rx,
+        )
+    }
+
+    #[test]
+    fn restarts_frame_numbering_after_rst_ack() {
+        Builder::new_current_thread()
+            .build()
+            .expect("runtime should build")
+            .block_on(async {
+                let (mut receiver, _responses, mut messages) = receiver();
+                receiver.last_received_frame_num = Some(3);
+                assert_eq!(receiver.ack_number(), 4);
+
+                receiver
+                    .handle_rst_ack(rst_ack())
+                    .await
+                    .expect("RSTACK should be forwarded");
+
+                assert_eq!(receiver.ack_number(), 0);
+                assert!(matches!(messages.try_recv(), Ok(Message::RstAck(_))));
+            });
     }
 }
