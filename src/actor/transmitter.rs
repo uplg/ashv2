@@ -238,6 +238,12 @@ where
             if timestamp.elapsed() < T_RSTACK_MAX {
                 debug!("Connection established successfully.");
                 self.status = Status::Connected;
+                // Per the ASH specification, both sides restart frame numbering from zero after
+                // a reset. Frames in flight belong to the previous session and are lost; their
+                // callers have already been answered and the upper layer retries on timeout.
+                self.frame_number = 0;
+                self.ack_number = 0;
+                self.transmissions.clear();
                 self.flush_pending().await
             } else {
                 warn!("RST ACK received after timeout. Resetting connection again.");
@@ -465,6 +471,30 @@ mod tests {
             assert!(transmitter.pending.is_empty());
             assert_eq!(transmitter.transmissions.len(), 1);
             assert!(matches!(response.try_recv(), Ok(Ok(()))));
+        });
+    }
+
+    #[test]
+    fn restarts_frame_numbering_after_reset() {
+        block_on(async {
+            let mut transmitter = transmitter();
+            connect(&mut transmitter).await;
+
+            for _ in 0..3 {
+                let (message, _response) = payload();
+                transmitter
+                    .handle_message(message)
+                    .await
+                    .expect("payload should be sent");
+            }
+            assert_eq!(transmitter.frame_number, 3);
+            assert_eq!(transmitter.transmissions.len(), 3);
+
+            transmitter.status = Status::Failed;
+            connect(&mut transmitter).await;
+            assert_eq!(transmitter.frame_number, 0);
+            assert_eq!(transmitter.ack_number, 0);
+            assert!(transmitter.transmissions.is_empty());
         });
     }
 
