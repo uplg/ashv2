@@ -262,8 +262,10 @@ sequenceDiagram
   - retransmit count.
 - On inbound `ACK`, matching transmitted frames are retired.
 - On inbound `NAK`, matching frame is removed and retransmitted with retransmit flag set.
-- Timed-out transmissions are dropped when processing ACK/NAK maintenance.
-- After too many retransmissions (`ACK_TIMEOUTS = 4` in current code), transmit returns timeout error.
+- Transmissions not acknowledged within `T_RX_ACK_MAX` (measured from the latest
+  (re-)transmission) are retransmitted with the retransmit flag set by the housekeeping tick.
+- After too many retransmissions (`ACK_TIMEOUTS = 4` in current code), transmit returns timeout
+  error and the connection is reset.
 
 ## CRC Validation
 
