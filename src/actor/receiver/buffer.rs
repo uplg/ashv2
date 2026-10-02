@@ -55,10 +55,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if serial I/O fails, the byte stream ends before another frame is
-    /// available, or the completed frame cannot be parsed.
-    pub async fn read_frame(&mut self) -> Result<Frame> {
-        self.read_raw_frame().await?.try_into()
+    /// Returns an outer error if serial I/O fails or the byte stream ends before another frame
+    /// is available. Such errors are terminal: the underlying stream stays exhausted.
+    ///
+    /// Returns an inner error if the completed frame cannot be parsed. Reading may continue
+    /// with the next frame.
+    pub async fn read_frame(&mut self) -> Result<Result<Frame>> {
+        Ok(self.read_raw_frame().await?.try_into())
     }
 
     async fn read_raw_frame(&mut self) -> Result<Drain<'_, u8>> {

@@ -53,10 +53,18 @@ where
 
         while running.load(Relaxed) {
             let frame = match self.buffer.read_frame().await {
-                Ok(frame) => frame,
-                Err(error) => {
-                    error!("Error receiving frame: {error}");
+                Ok(Ok(frame)) => frame,
+                Ok(Err(error)) => {
+                    warn!("Discarding invalid frame: {error}");
                     continue;
+                }
+                Err(error) => {
+                    // After an I/O error or the end of the stream, the reader stays exhausted:
+                    // retrying would busy-spin on the same error forever without ever yielding
+                    // to the runtime. Exit instead, so that the caller can observe the
+                    // terminated receiver future and rebuild the transport.
+                    error!("Fatal error receiving frame, receiver exiting: {error}");
+                    break;
                 }
             };
 
@@ -215,6 +223,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
     use tokio::io::{Empty, empty};
     use tokio::runtime::Builder;
     use tokio::sync::mpsc::{Receiver as MpscReceiver, channel};
@@ -248,6 +260,28 @@ mod tests {
             response_rx,
             transmitter_rx,
         )
+    }
+
+    #[test]
+    fn exits_on_end_of_stream_but_skips_invalid_frames() {
+        Builder::new_current_thread()
+            .build()
+            .expect("runtime should build")
+            .block_on(async {
+                const FLAG: u8 = 0x7E;
+                // A truncated DATA frame, then a valid RSTACK, then the end of the stream.
+                let mut input = vec![0x01, FLAG];
+                input.extend(RST_ACK_BYTES);
+                input.push(FLAG);
+                let (response_tx, _responses) = channel(CHANNEL_SIZE);
+                let (transmitter_tx, mut messages) = channel(CHANNEL_SIZE);
+                let receiver = Receiver::new(Cursor::new(input), response_tx, transmitter_tx);
+
+                // Returns instead of spinning forever on the exhausted stream.
+                receiver.run(Arc::new(AtomicBool::new(true))).await;
+
+                assert!(matches!(messages.try_recv(), Ok(Message::RstAck(_))));
+            });
     }
 
     #[test]
