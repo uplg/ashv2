@@ -39,7 +39,10 @@ Important behavior details:
 - `Handle::send(payload).await` confirms local transmission attempt (I/O success), not the remote ASH response payload.
 - Payload requests made before the ASH link is established remain queued while the initial reset
   handshake is driven.
-- When the transmit window is full, the transmitter requeues the payload request without delay.
+- When the transmit window is full, payload requests wait in a bounded local queue and are sent in
+  order as the window frees up.
+- The actor futures use `tokio::time`, so the runtime polling them must have its time driver
+  enabled.
 - Incoming `DATA` payloads are delivered through the response channel passed to `start(...)`.
 - Payload type is `heapless::Vec<u8, MAX_PAYLOAD_SIZE>` (`MAX_PAYLOAD_SIZE` defaults to `128`).
 
