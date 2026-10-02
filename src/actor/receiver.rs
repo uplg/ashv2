@@ -128,10 +128,13 @@ where
         }
 
         if data.is_retransmission() {
-            debug!("Received retransmission of data frame: {data}");
+            // A retransmission of the frame we expect next was handled as in-sequence above.
+            // Any other retransmission repeats a payload that has already been delivered:
+            // acknowledge it, but do not forward the payload again, as feeding the same bytes
+            // twice to the upper layer desynchronises it.
+            debug!("Discarding duplicate retransmission of data frame: {data}");
             self.send_ack().await?;
             self.ack_sent_frames(data.ack_num()).await?;
-            self.handle_payload(data.into_payload()).await;
             return Ok(());
         }
 
@@ -233,7 +236,7 @@ mod tests {
 
     use super::Receiver;
     use crate::actor::message::Message;
-    use crate::frame::RstAck;
+    use crate::frame::{Data, RstAck};
     use crate::types::Payload;
 
     const RST_ACK_BYTES: [u8; 5] = [0xC1, 0x02, 0x02, 0x9B, 0x7B];
@@ -281,6 +284,36 @@ mod tests {
                 receiver.run(Arc::new(AtomicBool::new(true))).await;
 
                 assert!(matches!(messages.try_recv(), Ok(Message::RstAck(_))));
+            });
+    }
+
+    #[test]
+    fn acks_but_does_not_forward_duplicate_retransmissions() {
+        Builder::new_current_thread()
+            .build()
+            .expect("runtime should build")
+            .block_on(async {
+                let (mut receiver, mut responses, mut messages) = receiver();
+                let payload: Payload = [0x01, 0x02, 0x03].into_iter().collect();
+                let data = Data::new(0, 0, payload.clone());
+                let mut retransmission = data.clone();
+                retransmission.set_is_retransmission(true);
+
+                receiver
+                    .handle_data(data)
+                    .await
+                    .expect("DATA should be handled");
+                assert_eq!(responses.try_recv().ok(), Some(payload));
+                assert!(matches!(messages.try_recv(), Ok(Message::SendAck(1))));
+                assert!(matches!(messages.try_recv(), Ok(Message::ReceivedAck(0))));
+
+                receiver
+                    .handle_data(retransmission)
+                    .await
+                    .expect("retransmitted DATA should be handled");
+                assert!(responses.try_recv().is_err());
+                assert!(matches!(messages.try_recv(), Ok(Message::SendAck(1))));
+                assert!(matches!(messages.try_recv(), Ok(Message::ReceivedAck(0))));
             });
     }
 
