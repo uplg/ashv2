@@ -123,6 +123,10 @@ impl LowerHex for Error {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::iter_with_drain,
+    reason = "frames are parsed from a `Drain`, as the receiver buffer yields them"
+)]
 mod tests {
     use super::Error;
     use crate::code::Code;

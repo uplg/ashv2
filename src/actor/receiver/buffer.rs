@@ -202,18 +202,18 @@ mod tests {
                 input.push(flag);
                 let mut buffer = Buffer::new(Cursor::new(input));
 
-                let oversized_frame: Vec<_> = buffer
+                let oversized_frame_len = buffer
                     .read_raw_frame()
                     .await
                     .expect("oversized frame should be readable")
-                    .collect();
+                    .count();
                 let second_frame: Vec<_> = buffer
                     .read_raw_frame()
                     .await
                     .expect("second frame should be readable")
                     .collect();
 
-                assert_eq!(oversized_frame.len(), MAX_FRAME_SIZE + EXTRA_FRAME_BYTES);
+                assert_eq!(oversized_frame_len, MAX_FRAME_SIZE + EXTRA_FRAME_BYTES);
                 assert_eq!(second_frame, [SECOND_FRAME_BYTE]);
                 assert!(buffer.frame.capacity() <= MAX_FRAME_SIZE);
             });

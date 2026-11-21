@@ -181,6 +181,10 @@ fn calculate_crc(header: u8, payload: &Payload) -> u16 {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
+#[expect(
+    clippy::iter_with_drain,
+    reason = "frames are parsed from a `Drain`, as the receiver buffer yields them"
+)]
 mod tests {
     use super::{Data, Header};
     use crate::protocol::Mask;

@@ -107,6 +107,10 @@ impl LowerHex for Ack {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::iter_with_drain,
+    reason = "frames are parsed from a `Drain`, as the receiver buffer yields them"
+)]
 mod tests {
     use super::{Ack, Header};
     use crate::validate::Validate;

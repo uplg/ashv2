@@ -107,6 +107,10 @@ impl LowerHex for Nak {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::iter_with_drain,
+    reason = "frames are parsed from a `Drain`, as the receiver buffer yields them"
+)]
 mod tests {
     use super::{Header, Nak};
     use crate::validate::Validate;

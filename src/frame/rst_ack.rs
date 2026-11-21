@@ -127,6 +127,10 @@ impl LowerHex for RstAck {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::iter_with_drain,
+    reason = "frames are parsed from a `Drain`, as the receiver buffer yields them"
+)]
 mod tests {
     use super::RstAck;
     use crate::code::Code;
